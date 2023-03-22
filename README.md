@@ -3,6 +3,7 @@
 Consul balancer for Openresty/Nginx.
 
 * consul-balancer.lua - a lua file ready to copy/paste
+* lua-resty-balancer - git submodule from https://github.com/openresty/lua-resty-balancer
 * nginx.conf - the minimal Nginx config as an example
 
 ## Features
@@ -11,30 +12,83 @@ Consul balancer for Openresty/Nginx.
 * Periodically refresh addresses
 * By default it picks up only non-critical services based on the Consul native healthcheck
 * Optionally, you can enable an additional custom healthcheck against the service URL or allow services in warning state
-* Traffic throttling for new instances of the services as configured by service_warmup_period
 * Last address standing - in case no addresses are available from Consul you will still get the latest one
-* Bonus: extra logic to sleep for 5s every 10 retries on error if `set $delayed_retry 1;` is defined on nginx location
+* Possibility to get consul instalces (services) via consul service or prepared query template (more detailes https://developer.hashicorp.com/consul/api-docs/query https://developer.hashicorp.com/consul/docs/services/discovery/dns-dynamic-lookups)
+* Two upsream balance logic: roundrobin and consistent hash method
+* Possibility to specify key for hash balanced method
+* Bonus: extra logic to sleep for 5s every retries of all upstream backend servers on error if `set $delayed_retry 1;` is defined on nginx location
+
+Traffic throttling from origin was removed as it could cause issue in case of usage prepared query template
 
 ## Description
 
 You can configure service discovery refresh interval. There are also a couple of hardcoded settings in the lua file.
-
-Traffic throttling means that a new service will receive less traffic proportionally within service_warmup_period.
-For example, if service_warmup_period is 60s then a new service instance will receive 10% of the traffic on 10th second, 50% on 30th second and so on until full on 60th second. It will be visible from the status page
-(see percentage in the end of this page as an example).
 
 We are using this lua code at Quiq for 4 years or so and it is very fast with even 50 services in total
 and multiple addresses per each one. It doesn't produce much load on Openresty/Nginx if any at all.
 
 ## Openresty required modules
 
-* lua-resty-http
-* lunajson
+* resty.http
+* resty.chash
+* cjson
 
-They can be installed via luarocks:
+Installation:
 
-    /usr/local/openresty/luajit/bin/luarocks install lua-resty-http
-    /usr/local/openresty/luajit/bin/luarocks install lunajson
+```
+git submodule update --init
+git submodule update --remote
+cd lua-resty-balancer
+make
+```
+
+First you need to run `make` from the  to generate the librestychash.so.
+Then you need to configure the lua_package_path and lua_package_cpath directive
+to add the path of your lua-resty-chash source tree to ngx_lua's LUA_PATH search
+path, as in
+
+```nginx
+    # nginx.conf
+    http {
+        lua_package_path "/path/to/lua-resty-balancer/lib/?.lua;;";
+        lua_package_cpath "/path/to/lua-resty-balancer/?.so;;";
+        ...
+    }
+```
+
+Ensure that the system account running your Nginx ''worker'' proceses have
+enough permission to read the `.lua` and `.so` file.
+
+## Consul prepared Geo-Failover query example
+
+Consul prepared query template:
+```template_from_service_with_tags.json
+{
+  "Name": "find_",
+  "Template": {
+    "Type": "name_prefix_match",
+    "Regexp": "^find_([^_]+)(?:_)?([^_]+)?(?:_)?([^_]+)?(?:_)?([^_]+)?.*$",
+    "RemoveEmptyTags": true
+  },
+  "Service": {
+    "Service": "${match(1)}",
+     "Tags": ["${match(2)}", "${match(3)}", "${match(4)}"],
+    "Failover": {
+      "NearestN": 2
+    }
+  }
+}
+```
+Add query template to each Consul cluster:
+```
+curl --header "X-Consul-Token: $CONSUL_HTTP_TOKEN" --header "Content-Type: application/json" http://127.0.0.1:8500/v1/query --request POST --data @template_from_service_with_tags.json
+```
+
+Example query request for service with name service-name:
+```
+curl --header "X-Consul-Token: $CONSUL_HTTP_TOKEN" --header "Content-Type: application/json" 'http://127.0.0.1:8500/v1/query/find_service-name_tag1_tag2_tag3/execute'
+```
+
 
 ## Test with docker
 
@@ -43,11 +97,12 @@ you can run a test as follow:
 
     $ ls -la
     total 80
-    -rw-r--r--  1 weber  staff   1830 Aug  3 16:38 bundle-crt.pem
-    -rw-r--r--  1 weber  staff   3940 Aug  3 16:42 ca-certificates.crt
-    -rw-r--r--  1 weber  staff  12459 Aug  4 15:20 consul-balancer.lua
-    -rw-r--r--  1 weber  staff   3243 Aug  3 16:38 key.pem
-    -rw-r--r--  1 weber  staff   1956 Aug  4 15:21 nginx.conf
+    -rw-r--r--  1 weber  staff   1830 Mar 22 16:38 bundle-crt.pem
+    -rw-r--r--  1 weber  staff   3940 Mar 22 16:42 ca-certificates.crt
+    -rw-r--r--  1 weber  staff  12459 Mar 22 15:20 consul-balancer.lua
+    drwxr-xr-x 13 weber  staff    416 Mar 22 09:42 lua-resty-balancer
+    -rw-r--r--  1 weber  staff   3243 Mar 22 16:38 key.pem
+    -rw-r--r--  1 weber  staff   1956 Mar 22 15:21 nginx.conf
     $
     $ docker run --rm -d -p 443:443 -v $PWD:/usr/local/openresty/nginx/conf:ro quiq/openresty:1.21.4.1-alpine
 

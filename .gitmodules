@@ -1,0 +1,4 @@
+[submodule "lua-resty-balancer"]
+	path = lua-resty-balancer
+	url = https://github.com/openresty/lua-resty-balancer.git
+        ignore = all
